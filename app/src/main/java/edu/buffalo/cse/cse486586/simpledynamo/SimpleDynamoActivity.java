@@ -7,6 +7,7 @@ import android.util.Log;
 import android.view.Menu;
 import android.widget.TextView;
 
+// Edited by sajid
 public class SimpleDynamoActivity extends Activity {
 
 	@Override
