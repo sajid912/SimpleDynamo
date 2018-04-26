@@ -1,11 +1,14 @@
 package edu.buffalo.cse.cse486586.simpledynamo;
 
+import android.content.Context;
 import android.os.Bundle;
 import android.app.Activity;
+import android.telephony.TelephonyManager;
 import android.text.method.ScrollingMovementMethod;
 import android.util.Log;
 import android.view.Menu;
 import android.widget.TextView;
+import android.widget.Toast;
 
 // Edited by sajid
 public class SimpleDynamoActivity extends Activity {
@@ -17,6 +20,11 @@ public class SimpleDynamoActivity extends Activity {
     
 		TextView tv = (TextView) findViewById(R.id.textView1);
         tv.setMovementMethod(new ScrollingMovementMethod());
+
+		TelephonyManager tel = (TelephonyManager) this.getSystemService(Context.TELEPHONY_SERVICE);
+		String portStr = tel.getLine1Number().substring(tel.getLine1Number().length() - 4);
+		String myPort = String.valueOf((Integer.parseInt(portStr) * 2));
+		Toast.makeText(getApplicationContext(), "My port number:" + myPort, Toast.LENGTH_SHORT).show();
 	}
 
 	@Override
