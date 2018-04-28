@@ -38,5 +38,4 @@ public class SimpleDynamoActivity extends Activity {
         super.onStop();
 	    Log.v("Test", "onStop()");
 	}
-
 }

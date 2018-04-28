@@ -25,6 +25,9 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Formatter;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
@@ -54,15 +57,25 @@ public class SimpleDynamoProvider extends ContentProvider {
     private Object insertLock = new Object();
     private ArrayList<String> allDataQueryReplyList = new ArrayList<String>();
     private int allDataQueryReplyCount = 0;
+    private int allDataQueryActivePorts = 4;
     private HashMap<String, Integer> insertReplicaHashMap = new HashMap<String, Integer>();
+    private HashMap<String, Integer> liveReplicaHashMap = new HashMap<String, Integer>();
+    private HashMap<String, Integer> directInsertHashMap = new HashMap<String, Integer>();
 
-    ArrayList<String> coordinatorList = new ArrayList<String>();
-    ArrayList<String> successor1List = new ArrayList<String>();
-    ArrayList<String> successor2List = new ArrayList<String>();
+    private HashMap<String, String> coordinatorHashMap = new HashMap<String, String>();
+    private HashMap<String, String> successor1HashMap = new HashMap<String, String>();
+    private HashMap<String, String> successor2HashMap = new HashMap<String, String>();
 
-    private int liveReplicaCount=2;
+    private ArrayList<String> coordinatorDeleteList = new ArrayList<String>();
+    private ArrayList<String> successor1DeleteList = new ArrayList<String>();
+    private ArrayList<String> successor2DeleteList = new ArrayList<String>();
 
-	@Override
+    private boolean insertFlagForSameKey = false;
+    private Object insertLockForSameKey = new Object();
+
+
+
+    @Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
 		// TODO Auto-generated method stub
 
@@ -146,6 +159,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             }
             else if(selection.equals("@")) // return key value pairs in the local node
             {
+                int index = 0;
                 MatrixCursor matrixCursor = new MatrixCursor(new String[]{"key", "value"});
 
                 for(File file: getContext().getFilesDir().listFiles())
@@ -153,8 +167,14 @@ public class SimpleDynamoProvider extends ContentProvider {
                     String fileName = file.getName();
                     String fileValue = getFileContentFromName(fileName);
                     matrixCursor.addRow(new Object[]{fileName, fileValue});
+                    Log.d(TAG,"Each local file name:"+fileName);
+                    index++;
                 }
 
+                Log.d(TAG,"No of local files:"+index);
+                Log.d(TAG,"Coordinator delete list size:"+coordinatorDeleteList.size());
+                Log.d(TAG,"Successor1 delete list size:"+successor1DeleteList.size());
+                Log.d(TAG,"Successor2 delete list size:"+successor2DeleteList.size());
                 return matrixCursor;
             }
             else // other cases
@@ -233,10 +253,19 @@ public class SimpleDynamoProvider extends ContentProvider {
             return;
         }
 
-        coordinatorList.clear();
-        successor1List.clear();
-        successor2List.clear();
+        coordinatorHashMap.clear();
+        successor1HashMap.clear();
+        successor2HashMap.clear();
+
+        coordinatorDeleteList.clear();
+        successor1DeleteList.clear();
+        successor2DeleteList.clear();
+
+
         initializeNodeList();
+
+        // Also check if you missed any keys, ask predecessors and successors
+        askForMissingKeys();
     }
 
     private void insertValues(String key, String value)
@@ -274,10 +303,11 @@ public class SimpleDynamoProvider extends ContentProvider {
         {
             Log.d(TAG,"Trying to save locally");
             saveLocally(key, value);
-            coordinatorList.add(key+Constants.KEY_VALUE_SEPARATOR+value);
+            coordinatorHashMap.put(key, value);
             insertReplicaHashMap.put(key+Constants.TEXT_SEPARATOR+myNode.getPortNo(), 0);
+            liveReplicaHashMap.put(key+Constants.TEXT_SEPARATOR+myNode.getPortNo(), 2); // default 2 replicas
             // Also tell next two successor to save the key, value pair
-            saveReplicaInSuccessors(key, value, myNode.getPortNo());
+            saveReplicaInSuccessors(key, value, myNode.getPortNo(), myNode.getPortNo());
         }
     }
 
@@ -364,7 +394,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         return jsonObject.toString();
     }
 
-    private String constructQueryObject(String key, String coordinatorPortNo)
+    private String constructQueryObject(String key, String coordinatorPortNo, String firstSucc, String secondSucc, String tailPort)
     {
         JSONObject jsonObject = new JSONObject();
 
@@ -372,6 +402,9 @@ public class SimpleDynamoProvider extends ContentProvider {
             jsonObject.put(Constants.STATUS, 3); // 3 status for data query request
             jsonObject.put(Constants.QUERY_ORIGIN_PORT, myNode.getPortNo());
             jsonObject.put(Constants.COORDINATOR_PORT, coordinatorPortNo);
+            jsonObject.put(Constants.FIRST_REPLICA_PORT, firstSucc);
+            jsonObject.put(Constants.SECOND_REPLICA_PORT, secondSucc);
+            jsonObject.put(Constants.TAIL_PORT, tailPort);
             jsonObject.put(Constants.KEY, key);
 
         } catch (JSONException e) {
@@ -451,10 +484,10 @@ public class SimpleDynamoProvider extends ContentProvider {
         return "";
     }
 
-    private void saveReplicaInSuccessors(String key, String value, String dataOriginPort)
+    private void saveReplicaInSuccessors(String key, String value, String dataOriginPort, String coordinatorPortNo)
     {
         int index=1;
-        for(String successorPort: getSuccessorPorts(myNode.getPortNo()))
+        for(String successorPort: getSuccessorPorts(coordinatorPortNo))
         {
             new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, successorPort,
                     constructInsertReplicaObject(key, value, dataOriginPort, index), Constants.INSERT_REPLICA_REQUEST);
@@ -464,6 +497,33 @@ public class SimpleDynamoProvider extends ContentProvider {
     }
 
     private MatrixCursor handleOtherQueryCases(MatrixCursor matrixCursor, String selection)
+    {
+    //        if(selection.equals(currentInsertKey))
+    //        {
+    //
+    //        }
+    //        else
+    //            matrixCursor = handleOtherQueryCases1(matrixCursor, selection);
+
+            // query is asking for the key just inserted
+            // If insert operation is in progress - block on query
+            // Unblock when insert finishes and proceed with query
+//        try {
+//            synchronized (insertLockForSameKey) {
+//                if (insertFlag)
+//                    insertLockForSameKey.wait();
+//
+//                matrixCursor =
+//
+//            }
+//        } catch ( InterruptedException x ) {
+//            Log.d(TAG,"interrupted while waiting");
+//        }
+
+        return handleOtherQueryCases1(matrixCursor, selection);
+    }
+
+    private MatrixCursor handleOtherQueryCases1(MatrixCursor matrixCursor, String selection)
     {
         try {
 
@@ -483,7 +543,8 @@ public class SimpleDynamoProvider extends ContentProvider {
                     while ( globalFlag != true ) {
 
                         new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, secondSuccessorPortNo,
-                                constructQueryObject(selection, coordinatorPortNo), Constants.DATA_QUERY_REQUEST);
+                                constructQueryObject(selection, coordinatorPortNo, successorPorts.get(0),
+                                        successorPorts.get(1), successorPorts.get(1)), Constants.DATA_QUERY_REQUEST);
                         valueLock.wait();
 
                     }
@@ -538,7 +599,6 @@ public class SimpleDynamoProvider extends ContentProvider {
         } catch (NoSuchAlgorithmException e) {
             e.printStackTrace();
         }
-
 
         return matrixCursor;
     }
@@ -595,6 +655,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                 }
 
                 allDataQueryReplyCount = 0;
+                allDataQueryActivePorts = 4;
                 allDataQueryReplyList.clear(); // reset the values
 
             }
@@ -699,14 +760,20 @@ public class SimpleDynamoProvider extends ContentProvider {
             String hashedKey = genHash(selection);
             String coordinatorPortNo = getCoordinatorPortNo(hashedKey);
 
+            ArrayList<String> successors = getSuccessorPorts(coordinatorPortNo);
+
             if(coordinatorPortNo.equals(myNode.getPortNo()))
             {
                 getContext().getFileStreamPath(selection).delete();
+                coordinatorDeleteList.add(selection);
+                coordinatorHashMap.remove(selection);
+                deleteReplicaDirectlyInSuccessors(selection, coordinatorPortNo);
             }
             else // ask the coordinator and it's successors to delete
             {
                 new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,
-                        coordinatorPortNo, constructDataDeleteObject(selection), Constants.SINGLE_DATA_DELETE_REQUEST);
+                        coordinatorPortNo, constructDataDeleteObject(selection, coordinatorPortNo, successors.get(0),
+                                successors.get(1)), Constants.SINGLE_DATA_DELETE_REQUEST);
             }
         } catch (NoSuchAlgorithmException e) {
             e.printStackTrace();
@@ -714,13 +781,16 @@ public class SimpleDynamoProvider extends ContentProvider {
 
     }
 
-    private String constructDataDeleteObject(String selection)
+    private String constructDataDeleteObject(String selection, String coordinatorPort, String firstSuccPort, String secondSuccPort)
     {
         JSONObject jsonObject = new JSONObject();
 
         try {
             jsonObject.put(Constants.STATUS, 8); // 8 stands for single data file delete
             jsonObject.put(Constants.KEY, selection);
+            jsonObject.put(Constants.COORDINATOR_PORT, coordinatorPort);
+            jsonObject.put(Constants.FIRST_REPLICA_PORT, firstSuccPort);
+            jsonObject.put(Constants.SECOND_REPLICA_PORT, secondSuccPort);
 
         } catch (JSONException e) {
             e.printStackTrace();
@@ -730,21 +800,23 @@ public class SimpleDynamoProvider extends ContentProvider {
 
     private void deleteReplicaInSuccessors(String key)
      {
-
+        int index=1;
         for(String successorPort: getSuccessorPorts(myNode.getPortNo()))
         {
             new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, successorPort,
-                    constructDeleteReplicaObject(key), Constants.DELETE_REPLICA_REQUEST);
+                    constructDeleteReplicaObject(key, index), Constants.DELETE_REPLICA_REQUEST);
+            index++;
         }
     }
 
-    private String constructDeleteReplicaObject(String key)
+    private String constructDeleteReplicaObject(String key, int index)
     {
         JSONObject jsonObject = new JSONObject();
 
         try {
             jsonObject.put(Constants.STATUS, 9);
             jsonObject.put(Constants.KEY, key);
+            jsonObject.put(Constants.REPLICA_INDEX, index);
 
         } catch (JSONException e) {
             e.printStackTrace();
@@ -789,11 +861,285 @@ public class SimpleDynamoProvider extends ContentProvider {
             insertFlag = true;
             insertLock.notify();  // notifyAll() might be safer...
         }
+
+        synchronized (insertLockForSameKey) {
+            insertLockForSameKey.notify();
+        }
     }
 
     private String stripVersion(String fileName)
     {
         return fileName.split(Constants.VERSION_SEPARATOR)[0];
+    }
+
+    private void saveReplicaDirectlyInSuccessors(String key, String value, String dataOriginPort, String coordinatorPortNo)
+    {
+        int index=1;
+        for(String successorPort: getSuccessorPorts(coordinatorPortNo))
+        {
+            new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, successorPort,
+                    constructDirectReplicaInsertObject(key, value, dataOriginPort, index), Constants.DIRECT_INSERT_REPLICA_REQUEST);
+            index++;
+        }
+    }
+
+    private String constructDirectReplicaInsertObject(String key, String value, String dataOriginPort, int index)
+    {
+        JSONObject jsonObject = new JSONObject();
+
+        try {
+            jsonObject.put(Constants.STATUS, 12); // 12 for direct replica insert
+            jsonObject.put(Constants.DATA_ORIGIN_PORT, dataOriginPort);
+            jsonObject.put(Constants.KEY, key);
+            jsonObject.put(Constants.VALUE, value);
+            jsonObject.put(Constants.REPLICA_INDEX, index);
+
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+        return jsonObject.toString();
+    }
+
+    private String constructDirectInsertReplicaReply(String key, String dataOriginPort)
+    {
+        JSONObject jsonObject = new JSONObject();
+
+        try {
+            jsonObject.put(Constants.STATUS, 13); // 13 for direct insert replica reply
+            jsonObject.put(Constants.KEY, key);
+            jsonObject.put(Constants.DATA_ORIGIN_PORT, dataOriginPort);
+
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+        return jsonObject.toString();
+    }
+
+    private void askForMissingKeys()
+    {
+        ArrayList<String> predecessors = getPredecessorPorts();
+        ArrayList<String> successors = getSuccessorPorts(myNode.getPortNo());
+
+        int index = 100; // 100 for predecessor, 101 for pre-pred, 102 for successor
+        for(String port: predecessors) // Ask predecessors first
+        {
+            new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, port,
+                    constructMissingKeysRequestObject(myNode.getPortNo(), index), Constants.ASK_MISSING_KEYS);
+            index++;
+        }
+
+        // Now ask successor - successors[0]
+        new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, successors.get(0),
+                constructMissingKeysRequestObject(myNode.getPortNo(), index), Constants.ASK_MISSING_KEYS);
+    }
+
+    private ArrayList<String> getPredecessorPorts()
+    {
+        ArrayList<String> ports= new ArrayList<String>();
+
+        for(int i=0;i<nodeList.size();i++)
+        {
+            if(nodeList.get(i).getPortNo().equals(myNode.getPortNo()))
+            {
+                if(i==0)
+                {
+                    ports.add(nodeList.get(nodeList.size()-1).getPortNo()); // Predecessor
+                    ports.add(nodeList.get(nodeList.size()-2).getPortNo()); // Predecessors Predecessor
+                }
+                else if(i==1)
+                {
+                    ports.add(nodeList.get(0).getPortNo());
+                    ports.add(nodeList.get(nodeList.size()-1).getPortNo());
+                }
+                else
+                {
+                    ports.add(nodeList.get(i-1).getPortNo());
+                    ports.add(nodeList.get(i-2).getPortNo());
+                }
+
+                break;
+            }
+        }
+
+        for(String s: ports)
+            Log.d(TAG,"Predecessor ports:"+s);
+
+        return ports;
+    }
+
+    private String constructMissingKeysRequestObject(String askingPort, int keyType)
+    {
+        JSONObject jsonObject = new JSONObject();
+
+        try {
+            jsonObject.put(Constants.STATUS, 14); // 14 for asking missing keys
+            jsonObject.put(Constants.ASKING_PORT, askingPort);
+            jsonObject.put(Constants.KEY_TYPE, keyType);
+
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+        return jsonObject.toString();
+    }
+
+    private String getCoordinatorKeys()
+    {
+        StringBuilder sb = new StringBuilder("");
+
+        Iterator it = coordinatorHashMap.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry pair = (Map.Entry)it.next();
+            sb.append(pair.getKey()+Constants.KEY_VALUE_SEPARATOR+pair.getValue());
+            sb.append(Constants.TEXT_SEPARATOR);
+        }
+
+        sb.append(Constants.INSERT_DELETE_SEPARATOR);
+
+        for(String deleteKey: coordinatorDeleteList)
+        {
+           sb.append(deleteKey);
+           sb.append(Constants.TEXT_SEPARATOR);
+        }
+
+        String s = sb.toString();
+//        if(s.isEmpty())
+//            s = s + Constants.NO_KEYS;
+
+        return s;
+    }
+
+    private String constructMissingKeysReplyObject(int keyType, String keys)
+    {
+        JSONObject jsonObject = new JSONObject();
+
+        try {
+            jsonObject.put(Constants.STATUS, 15); // 15 for missing keys reply
+            jsonObject.put(Constants.KEY_TYPE, keyType);
+            jsonObject.put(Constants.KEY_CONTENT, keys);
+
+
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+        return jsonObject.toString();
+    }
+
+    private String getSuccessor1Keys()
+    {
+        StringBuilder sb = new StringBuilder("");
+
+        Iterator it = successor1HashMap.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry pair = (Map.Entry)it.next();
+            sb.append(pair.getKey()+Constants.KEY_VALUE_SEPARATOR+pair.getValue());
+            sb.append(Constants.TEXT_SEPARATOR);
+        }
+
+        sb.append(Constants.INSERT_DELETE_SEPARATOR);
+
+        for(String deleteKey: successor1DeleteList)
+        {
+            sb.append(deleteKey);
+            sb.append(Constants.TEXT_SEPARATOR);
+        }
+
+        String s = sb.toString();
+//        if(s.isEmpty())
+//            s = s + Constants.NO_KEYS;
+
+        return s;
+    }
+
+    private void deleteReplicaDirectlyInSuccessors(String key, String coordinatorPortNo)
+    {
+        int index = 1;
+        for(String successorPort: getSuccessorPorts(coordinatorPortNo))
+        {
+            new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, successorPort,
+                    constructDirectReplicaDeleteObject(key, index), Constants.DIRECT_DELETE_REPLICA_REQUEST);
+            index++;
+        }
+    }
+
+    private String constructDirectReplicaDeleteObject(String key, int index)
+    {
+        JSONObject jsonObject = new JSONObject();
+
+        try {
+            jsonObject.put(Constants.STATUS, 16); // 16 for direct replica delete
+            jsonObject.put(Constants.KEY, key);
+            jsonObject.put(Constants.REPLICA_INDEX, index);
+
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+        return jsonObject.toString();
+    }
+
+    private void parseInsertContent(String insertContent, int type)
+    {
+        // Play insert
+        String[] keyvals = insertContent.split(Constants.TEXT_SEPARATOR);
+        for(String keyval: keyvals)
+        {
+            if(!keyval.isEmpty())
+            {
+                String[] a = keyval.split(Constants.KEY_VALUE_SEPARATOR);
+                if(a.length == 2)
+                {
+                    saveLocally(a[0], a[1]); // Because any type of key should be saved locally
+                    if(type == 100)
+                    {
+                        //successor1HashMap.clear();
+                        successor1HashMap.put(a[0],a[1]);
+                    }
+                    else if(type == 101)
+                    {
+                        //successor2HashMap.clear();
+                        successor2HashMap.put(a[0],a[1]);
+                    }
+                    else if(type == 102)
+                    {
+                        //coordinatorHashMap.clear();
+                        coordinatorHashMap.put(a[0],a[1]);
+                    }
+                }
+
+            }
+        }
+
+    }
+
+    private void parseDeleteContent(String deleteContent, int type)
+    {
+        Log.d(TAG,"Coordinator delete list size:"+coordinatorDeleteList.size());
+        Log.d(TAG,"Successor1 delete list size:"+successor1DeleteList.size());
+        Log.d(TAG,"Successor2 delete list size:"+successor2DeleteList.size());
+
+        // Play delete
+        String[] deleteKeys = deleteContent.split(Constants.TEXT_SEPARATOR);
+        for(String deleteKey: deleteKeys)
+        {
+            if(!deleteKey.isEmpty())
+            {
+                getContext().getFileStreamPath(deleteKey).delete();
+                if(type == 100)
+                {
+                    successor1DeleteList.add(deleteKey);
+                    successor1HashMap.remove(deleteKey);
+                }
+                else if(type == 101)
+                {
+                    successor2DeleteList.add(deleteKey);
+                    successor2HashMap.remove(deleteKey);
+                }
+                else if(type == 102)
+                {
+                    coordinatorDeleteList.add(deleteKey);
+                    coordinatorHashMap.remove(deleteKey);
+                }
+            }
+        }
     }
 
     private class clientTask extends AsyncTask<String, String, Void> {
@@ -817,21 +1163,25 @@ public class SimpleDynamoProvider extends ContentProvider {
 
                 Log.d(TAG, "clientTask to port" + msgToSend + " : " + msgs[0]);
 
-                if(msgs[2].equals(Constants.INSERT_REPLICA_REQUEST) || msgs[2].equals(Constants.DATA_QUERY_REQUEST)
-                        || msgs[2].equals(Constants.ALL_DATA_QUERY_REQUEST))
-                {
-                    InputStream inputStream = socket.getInputStream();
-                    BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(inputStream));
-                    String reply = bufferedReader.readLine();
-                    Log.d(TAG, "Reply status:" + reply);
-                    if(msgs[2].equals(Constants.INSERT_REPLICA_REQUEST))
-                        publishProgress(Constants.INSERT_REPLICA_REPLY, reply);
-                    else if(msgs[2].equals(Constants.DATA_QUERY_REQUEST))
-                        handleDataQueryReply(reply);
-                    else if(msgs[2].equals(Constants.ALL_DATA_QUERY_REQUEST))
-                        handleAllDataQueryReply(reply);
-                    bufferedReader.close();
-                }
+                InputStream inputStream = socket.getInputStream();
+                BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(inputStream));
+                String reply = bufferedReader.readLine();
+                Log.d(TAG, "Reply status:" + reply);
+
+                if(reply == null || reply.isEmpty())
+                    connectionFailed = true;
+                else if(msgs[2].equals(Constants.INSERT_REPLICA_REQUEST))
+                    publishProgress(Constants.INSERT_REPLICA_REPLY, reply);
+                else if(msgs[2].equals(Constants.DATA_QUERY_REQUEST))
+                    handleDataQueryReply(reply);
+                else if(msgs[2].equals(Constants.ALL_DATA_QUERY_REQUEST))
+                    handleAllDataQueryReply(reply);
+                else if(msgs[2].equals(Constants.DIRECT_INSERT_REPLICA_REQUEST))
+                    publishProgress(Constants.DIRECT_INSERT_REPLICA_REPLY, reply);
+                else if(msgs[2].equals(Constants.ASK_MISSING_KEYS))
+                    publishProgress(Constants.ASK_MISSING_KEYS, reply);
+
+                bufferedReader.close();
 
                 out.close();
                 socket.close();
@@ -854,7 +1204,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             }
 
             if(connectionFailed)
-                publishProgress(Constants.FAILURE_CASES, msgs[1], msgs[2]);
+                publishProgress(Constants.FAILURE_CASES, msgs[0], msgs[1], msgs[2]); // Const, remotePortNo, msgToSend, caseType
 
             return null;
         }
@@ -869,7 +1219,15 @@ public class SimpleDynamoProvider extends ContentProvider {
             } else  if(strings[0].equals(Constants.FAILURE_CASES))
             {
                 Log.v(TAG,"Failure case handling");
-                handleFailureCases(strings[1], strings[2]);
+                handleFailureCases(strings[1], strings[2], strings[3]);
+            } else  if(strings[0].equals(Constants.DIRECT_INSERT_REPLICA_REPLY))
+            {
+                Log.v(TAG,"Direct insert replica reply handling");
+                handleDirectInsertReplicaReply(strings[1]);
+            } else  if(strings[0].equals(Constants.ASK_MISSING_KEYS))
+            {
+                Log.v(TAG,"Missing keys reply handling");
+                handleMissingKeysReply(strings[1]);
             }
 
             return;
@@ -886,35 +1244,41 @@ public class SimpleDynamoProvider extends ContentProvider {
                 String keyPort = key+Constants.TEXT_SEPARATOR+dataOriginPort;
                 int count = insertReplicaHashMap.get(keyPort);
                 count++;
-                insertReplicaHashMap.put(keyPort, count);
+                insertReplicaHashMap.put(keyPort, count); // Increment the insert count on reply
 
-                if(count == liveReplicaCount)
-                {
-                    // clear the hashmap entry
-                    insertReplicaHashMap.remove(keyPort);
-
-                    // Got replies from both replicas, send reply to data origin port
-
-                    if(dataOriginPort.equals(myNode.getPortNo())) // If the data origin port is my port, I need not use clientTask
-                    {
-                        handleReplicationDone();
-                    }
-                    else
-                    {
-                        new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, dataOriginPort,
-                                constructReplicaDoneObject(key), Constants.REPLICATION_DONE);
-                    }
-
-                }
+                checkReplicationStatus(key, dataOriginPort);
 
             } catch (JSONException e) {
                 e.printStackTrace();
             }
         }
 
-        protected void checkReplicationStatus()
+        protected void checkReplicationStatus(String key, String dataOriginPort)
         {
+            String keyPort = key+Constants.TEXT_SEPARATOR+dataOriginPort;
 
+            int count = insertReplicaHashMap.get(keyPort);
+            int liveCount = liveReplicaHashMap.get(keyPort);
+
+            if(count == liveCount)
+            {
+                // clear the hashmap entry
+                insertReplicaHashMap.remove(keyPort);
+                liveReplicaHashMap.remove(keyPort);
+
+                // Got replies from both replicas, send reply to data origin port
+
+                if(dataOriginPort.equals(myNode.getPortNo())) // If the data origin port is my port, I need not use clientTask
+                {
+                    handleReplicationDone();
+                }
+                else
+                {
+                    new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, dataOriginPort,
+                            constructReplicaDoneObject(key), Constants.REPLICATION_DONE);
+                }
+
+            }
         }
 
         protected void handleDataQueryReply(String object)
@@ -956,47 +1320,231 @@ public class SimpleDynamoProvider extends ContentProvider {
                 }
                 allDataQueryReplyCount++;
 
-                if(allDataQueryReplyCount == 4) // Received content from all active emulators
-                {
-                    synchronized ( valueLock ) {
-                        globalFlag = true;
-                        valueLock.notifyAll();  // notifyAll() might be safer...
-                    }
-                }
-
+                checkAllDataQueryStatus();
 
             } catch (JSONException e) {
                 e.printStackTrace();
             }
         }
 
-        protected void handleFailureCases(String failedObject, String caseType)
+        private void checkAllDataQueryStatus()
         {
-            if(caseType.equals(Constants.INSERT_FORWARD_REQUEST))
+            Log.d(TAG,"allDataQueryReplyCount:"+allDataQueryReplyCount+" allDataQueryActivePorts:"+allDataQueryActivePorts);
+            if(allDataQueryReplyCount == allDataQueryActivePorts) // Received content from all active emulators
             {
-                // It means coordinator has failed
-            }
-            else if(caseType.equals(Constants.INSERT_REPLICA_REQUEST))
-            {
-                // It means either of successor has failed
-                try {
-
-                    JSONObject jsonObject = new JSONObject(failedObject);
-                    int index = jsonObject.getInt(Constants.REPLICA_INDEX);
-                    if(index == 1)
-                    {
-                        // First successor failed
-                    }
-                    else if(index == 2)
-                    {
-                        // second successor failed
-                    }
-                } catch (JSONException e) {
-                    Log.e(TAG,"JSON Exception occurred");
+                Log.d(TAG,"Removing all data query lock");
+                synchronized ( valueLock ) {
+                    globalFlag = true;
+                    valueLock.notify();  // notifyAll() might be safer...
                 }
             }
         }
 
+        protected void handleFailureCases(String remotePortNo, String failedObject, String caseType)
+        {
+
+            try {
+
+                if(caseType.equals(Constants.INSERT_FORWARD_REQUEST))
+                {
+                    // It means coordinator has failed
+                    JSONObject jsonObject = new JSONObject(failedObject);
+                    String key = jsonObject.getString(Constants.KEY);
+                    String value = jsonObject.getString(Constants.VALUE);
+                    String originPort = jsonObject.getString(Constants.DATA_ORIGIN_PORT);
+
+                    String keyPort = key+Constants.TEXT_SEPARATOR+originPort;
+
+                    directInsertHashMap.put(keyPort, 0); // reset this
+                    //directInsertReplicaReplyCount = 0;
+                    // remotePortNo in thus case is the coordinatorNo
+                    saveReplicaDirectlyInSuccessors(key, value, originPort, remotePortNo);
+                }
+                else if(caseType.equals(Constants.INSERT_REPLICA_REQUEST))
+                {
+                    // It means either of successor has failed
+
+                    JSONObject jsonObject = new JSONObject(failedObject);
+                    String key = jsonObject.getString(Constants.KEY);
+                    String originPort = jsonObject.getString(Constants.DATA_ORIGIN_PORT);
+                    int index = jsonObject.getInt(Constants.REPLICA_INDEX);
+
+                    String keyPort = key+Constants.TEXT_SEPARATOR+originPort;
+
+                    if(index == 1)
+                    {
+                        // First successor failed
+                        int liveCount = liveReplicaHashMap.get(keyPort);
+                        liveCount--;
+                        liveReplicaHashMap.put(keyPort, liveCount); // decrement the count on failure
+
+                    }
+                    else if(index == 2)
+                    {
+                        // second successor failed
+                        int liveCount = liveReplicaHashMap.get(keyPort);
+                        liveCount--;
+                        liveReplicaHashMap.put(keyPort, liveCount);
+                    }
+
+                    // On every failure, you got to check replication status
+                    checkReplicationStatus(key, originPort);
+                }
+                else if(caseType.equals(Constants.DATA_QUERY_REQUEST))
+                {
+                    // It means tail of chain failed
+
+                    JSONObject jsonObject = new JSONObject(failedObject);
+                    String selection = jsonObject.getString(Constants.KEY);
+                    String failedPort = jsonObject.getString(Constants.TAIL_PORT);
+                    String secondReplicaPort = jsonObject.getString(Constants.SECOND_REPLICA_PORT);
+                    String firstReplicaPort = jsonObject.getString(Constants.FIRST_REPLICA_PORT);
+                    String coordinatorPort = jsonObject.getString(Constants.COORDINATOR_PORT);
+
+                   if(failedPort.equals(secondReplicaPort))
+                   {
+                       // Tail is second succ and it has failed, so ask first succ and make it tail
+                       new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, firstReplicaPort,
+                               constructQueryObject(selection, coordinatorPort, firstReplicaPort, secondReplicaPort, firstReplicaPort),
+                               Constants.DATA_QUERY_REQUEST);
+
+                   }
+                   else if(failedPort.equals(firstReplicaPort))
+                   {
+                       // Since we always query second succ first
+                       // if failed port is first succ then both first and second succ have failed, so ask coordinator
+                       new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, coordinatorPort,
+                               constructQueryObject(selection, coordinatorPort, firstReplicaPort, secondReplicaPort, coordinatorPort),
+                               Constants.DATA_QUERY_REQUEST);
+
+                   }
+                   else if(failedPort.equals(coordinatorPort))
+                   {
+                       // Both succ have failed and so does coordinator..
+                       // No option but check if any of these 3 ports are online
+                   }
+                }
+                else if(caseType.equals(Constants.ALL_DATA_QUERY_REQUEST))
+                {
+                    // Remote port has failed
+                    allDataQueryActivePorts--;
+                    checkAllDataQueryStatus();
+                }
+                else if(caseType.equals(Constants.SINGLE_DATA_DELETE_REQUEST))
+                {
+                    // Coordinator is not online, delete replicas directly
+
+                    JSONObject jsonObject = new JSONObject(failedObject);
+                    String key = jsonObject.getString(Constants.KEY);
+
+                    deleteReplicaDirectlyInSuccessors(key, remotePortNo);
+                }
+
+            } catch (JSONException e) {
+                Log.e(TAG,"JSON Exception occurred");
+            }
+
+
+        }
+
+        protected void handleDirectInsertReplicaReply(String object)
+        {
+            try {
+
+                JSONObject jsonObject = new JSONObject(object);
+                int status = jsonObject.getInt(Constants.STATUS);
+                String key = jsonObject.getString(Constants.KEY);
+                String originPort = jsonObject.getString(Constants.DATA_ORIGIN_PORT);
+
+                String keyPort = key+Constants.TEXT_SEPARATOR+originPort;
+
+                if(status == 13) // Double checking
+                {
+                    int count = directInsertHashMap.get(keyPort);
+                    count++;
+                    directInsertHashMap.put(keyPort, count);
+
+                    if(count == 2) // Got replies from both replicas, so you can unblock insert method
+                    {
+                        directInsertHashMap.remove(keyPort);
+                        handleReplicationDone();
+                    }
+                }
+
+            } catch (JSONException e) {
+                e.printStackTrace();
+            }
+        }
+
+        protected void handleMissingKeysReply(String object)
+        {
+            try {
+
+                JSONObject jsonObject = new JSONObject(object);
+                int keyType = jsonObject.getInt(Constants.KEY_TYPE);
+                String keyContent = jsonObject.getString(Constants.KEY_CONTENT);
+
+                // First separate insert and delete content
+
+                String[] allContent = keyContent.split(Constants.INSERT_DELETE_SEPARATOR);
+
+                int index=0;
+                for(String content: allContent)
+                {
+                    if(!content.isEmpty())
+                    {
+                       if(index==0)
+                       {
+                          parseInsertContent(content, keyType);
+                       }
+                       else if(index==1)
+                       {
+                           parseDeleteContent(content, keyType);
+                       }
+                    }
+                    index++;
+                }
+// For readability
+//                if(keyType == 100)  // Got your successor1 keys
+//                {
+//
+//                    if(keyContent.isEmpty()) // Will never be empty, bcoz of delete keys separator
+//                    {
+//                        // You did not miss anything, do nothing
+//                    }
+//                    else
+//                    {
+//                        parseKeyContent(keyContent, 100);
+//                    }
+//                }
+//                else if(keyType == 101) // Got your successor2 keys
+//                {
+//                    if(keyContent.isEmpty()) // Will never be empty, bcoz of delete keys separator
+//                    {
+//                        // You did not miss anything, do nothing
+//                    }
+//                    else
+//                    {
+//                        parseKeyContent(keyContent, 101);
+//                    }
+//                }
+//                else if(keyType == 102) // Got your coordinator keys
+//                {
+//
+//                    if(keyContent.isEmpty()) // Will never be empty, bcoz of delete keys separator
+//                    {
+//                        // You did not miss anything, do nothing
+//                    }
+//                    else
+//                    {
+//                        parseKeyContent(keyContent, 102);
+//                    }
+//                }
+
+            } catch (JSONException e) {
+                e.printStackTrace();
+            }
+        }
 
     }
 
@@ -1023,9 +1571,10 @@ public class SimpleDynamoProvider extends ContentProvider {
                     JSONObject jsonObject = new JSONObject(message);
                     int status = jsonObject.getInt(Constants.STATUS);
                     if (status == 1) {
-                        Log.d(TAG,"Status is 1");
-                        publishProgress(Constants.INSERT_FORWARD_REQUEST, message);
 
+                        Log.d(TAG,"Status is 1");
+                        bufferedWriter.write(Constants.DUMMY_REPLY); // Send dummy replies to tell you are alive..
+                        publishProgress(Constants.INSERT_FORWARD_REQUEST, message);
                     } else if (status == 2) {
 
                         Log.d(TAG,"Status is 2");
@@ -1046,19 +1595,38 @@ public class SimpleDynamoProvider extends ContentProvider {
                     } else if(status == 7){
 
                         Log.d(TAG,"Status is 7");
+                        bufferedWriter.write(Constants.DUMMY_REPLY); // Send dummy replies to tell you are alive..
                         publishProgress(Constants.ALL_DATA_DELETE_REQUEST, message);
                     } else if (status == 8) {
 
                         Log.d(TAG,"Status is 8");
+                        bufferedWriter.write(Constants.DUMMY_REPLY); // Send dummy replies to tell you are alive..
                         publishProgress(Constants.SINGLE_DATA_DELETE_REQUEST, message);
                     } else if (status == 9) {
 
                         Log.d(TAG,"Status is 9");
+                        bufferedWriter.write(Constants.DUMMY_REPLY); // Send dummy replies to tell you are alive..
                         publishProgress(Constants.DELETE_REPLICA_REQUEST, message);
                     } else if (status == 11) {
 
                         Log.d(TAG,"Status is 11");
+                        bufferedWriter.write(Constants.DUMMY_REPLY); // Send dummy replies to tell you are alive..
                         publishProgress(Constants.REPLICATION_DONE, message);
+                    } else if (status == 12) {
+
+                        Log.d(TAG,"Status is 12");
+                        String reply = handleDirectInsertReplicaRequest(message);
+                        bufferedWriter.write(reply);
+                    } else if (status == 14) {
+
+                        Log.d(TAG,"Status is 14");
+                        String reply = handleMissingKeysRequest(message);
+                        bufferedWriter.write(reply);
+                    } else if (status == 16) {
+
+                        Log.d(TAG,"Status is 16");
+                        bufferedWriter.write(Constants.DUMMY_REPLY); // Send dummy replies to tell you are alive..
+                        publishProgress(Constants.DELETE_REPLICA_REQUEST, message); // Direct delete or simple delete - both do the same job
                     }
 
 
@@ -1132,8 +1700,9 @@ public class SimpleDynamoProvider extends ContentProvider {
                 String keyPort = key + Constants.TEXT_SEPARATOR + originPort;
                 // Also tell next two successor to save the key, value pair
                 insertReplicaHashMap.put(keyPort, 0);
-                coordinatorList.add(key+Constants.KEY_VALUE_SEPARATOR+value);
-                saveReplicaInSuccessors(key, value, originPort);
+                liveReplicaHashMap.put(keyPort, 2); // default 2 replicas
+                coordinatorHashMap.put(key, value);
+                saveReplicaInSuccessors(key, value, originPort, myNode.getPortNo());
 
             } catch (JSONException e) {
                 e.printStackTrace();
@@ -1153,9 +1722,9 @@ public class SimpleDynamoProvider extends ContentProvider {
                 int replicaIndex = jsonObject.getInt(Constants.REPLICA_INDEX);
 
                 if(replicaIndex == 1)
-                    successor1List.add(key+Constants.KEY_VALUE_SEPARATOR+value);
+                    successor1HashMap.put(key, value);
                 else if(replicaIndex == 2)
-                    successor2List.add(key+Constants.KEY_VALUE_SEPARATOR+value);
+                    successor2HashMap.put(key, value);
 
                  if(saveLocally(key, value))
                      return constructInsertReplicaReply(key, originPort);
@@ -1202,6 +1771,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                 String selection = jsonObject.getString(Constants.KEY);
 
                 getContext().getFileStreamPath(selection).delete();
+                coordinatorDeleteList.add(selection);
 
                 // Now ask successors to delete this file
                 deleteReplicaInSuccessors(selection);
@@ -1221,6 +1791,18 @@ public class SimpleDynamoProvider extends ContentProvider {
                 JSONObject jsonObject = new JSONObject(object);
 
                 String selection = jsonObject.getString(Constants.KEY);
+                int replicaIndex = jsonObject.getInt(Constants.REPLICA_INDEX);
+
+                if(replicaIndex == 1)
+                {
+                    successor1DeleteList.add(selection);
+                    successor1HashMap.remove(selection);
+                }
+                else if(replicaIndex == 2)
+                {
+                    successor2DeleteList.add(selection);
+                    successor2HashMap.remove(selection);
+                }
 
                 getContext().getFileStreamPath(selection).delete();
 
@@ -1228,6 +1810,72 @@ public class SimpleDynamoProvider extends ContentProvider {
                 e.printStackTrace();
             }
 
+        }
+
+        protected String handleDirectInsertReplicaRequest(String object)
+        {
+            try {
+
+                Log.d(TAG, "Direct Insert replica request:" + object);
+
+                JSONObject jsonObject = new JSONObject(object);
+                String key = jsonObject.getString(Constants.KEY);
+                String value = jsonObject.getString(Constants.VALUE);
+                String originPort = jsonObject.getString(Constants.DATA_ORIGIN_PORT);
+                int replicaIndex = jsonObject.getInt(Constants.REPLICA_INDEX);
+
+                if(replicaIndex == 1)
+                {
+                    successor1HashMap.put(key, value);
+                }
+
+                else if(replicaIndex == 2)
+                {
+                    successor2HashMap.put(key, value);
+                }
+
+
+                if(saveLocally(key, value))
+                    return constructDirectInsertReplicaReply(key, originPort);
+
+            } catch (JSONException e) {
+                e.printStackTrace();
+            }
+            return "";
+        }
+
+        protected String handleMissingKeysRequest(String object)
+        {
+            try {
+
+                Log.d(TAG, "Missing keys request:" + object);
+
+                JSONObject jsonObject = new JSONObject(object);
+                String requestorPort = jsonObject.getString(Constants.ASKING_PORT);
+                int keyType = jsonObject.getInt(Constants.KEY_TYPE);
+
+
+                if(keyType == 100)
+                {
+                    // Requestor port is asking you for its successor1 keys - Asking for your coordinator keys
+                    return constructMissingKeysReplyObject(100, getCoordinatorKeys());
+                }
+                else if(keyType == 101)
+                {
+                    // Requestor port is asking you for its successor2 keys - Asking for your coordinator keys
+                    return constructMissingKeysReplyObject(101, getCoordinatorKeys());
+                }
+                else if(keyType == 102)
+                {
+                    // Requestor port is asking you for its coordinator keys - Asking for your successor1 keys
+                    return constructMissingKeysReplyObject(102, getSuccessor1Keys());
+                }
+
+
+            } catch (JSONException e) {
+                e.printStackTrace();
+            }
+            return "";
         }
 
     }

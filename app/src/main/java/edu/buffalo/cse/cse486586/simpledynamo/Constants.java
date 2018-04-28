@@ -20,7 +20,7 @@ public class Constants {
     public static final String EMULATOR3_ID = "5560";
     public static final String EMULATOR4_ID = "5562";
 
-    public static final String DUMMY_CONSTANT = "dummyConstant";
+    public static final String DUMMY_REPLY = "dummyReply";
     public static final String INSERT_FORWARD_REQUEST = "insertForwardRequest";
     public static final String INSERT_REPLICA_REQUEST = "insertReplicaRequest";
     public static final String INSERT_REPLICA_REPLY = "insertReplicaReply";
@@ -35,12 +35,14 @@ public class Constants {
 
     public static final String KEY = "key";
     public static final String VALUE = "value";
+    public static final String STATUS = "status";
     public static final String REPLICA_INDEX = "replicaIndex";
 
     public static final String ALL_DATA_QUERY_REQUEST = "allDataQueryRequest";
     public static final String ALL_DATA_QUERY_REPLY = "allDataQueryReply";
 
     public static final String TEXT_SEPARATOR = "---";
+    public static final String INSERT_DELETE_SEPARATOR = ";+-+;";
     public static final String VERSION_SEPARATOR = "SAJIDKHA";
     public static final String KEY_VALUE_SEPARATOR = ";";
     public static final String ALL_DATA_QUERY_CONTENT = "allDataQueryContent";
@@ -57,8 +59,24 @@ public class Constants {
 
     public static final String FAILURE_CASES = "failureCases";
 
+    public static final String DIRECT_INSERT_REPLICA_REQUEST = "directInsertReplicaRequest";
+    public static final String DIRECT_INSERT_REPLICA_REPLY = "directInsertReplicaReply";
+
+    public static final String ASK_MISSING_KEYS = "askMissingKeys";
+    public static final String ASKING_PORT = "askingPort";
+    public static final String KEY_TYPE = "keyType";
+
+    public static final String NO_KEYS = "noKeys";
+    public static final String KEY_CONTENT = "keyContent";
+
+    public static final String FIRST_REPLICA_PORT = "firstReplicaPort";
+    public static final String SECOND_REPLICA_PORT = "secondReplicaPort";
+
+    public static final String TAIL_PORT = "tailPort";
+    public static final String DIRECT_DELETE_REPLICA_REQUEST = "directDeleteReplicaRequest";
+
+
     // so far
-    public static final String STATUS = "status";
     public static final String PREDECESSOR_PORT = "predecessorPort";
     public static final String SUCCESSOR_PORT = "successorPort";
 
