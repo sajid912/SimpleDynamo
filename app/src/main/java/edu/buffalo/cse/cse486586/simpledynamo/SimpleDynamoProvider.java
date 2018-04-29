@@ -28,6 +28,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
@@ -66,14 +67,8 @@ public class SimpleDynamoProvider extends ContentProvider {
     private HashMap<String, String> successor1HashMap = new HashMap<String, String>();
     private HashMap<String, String> successor2HashMap = new HashMap<String, String>();
 
-    private ArrayList<String> coordinatorDeleteList = new ArrayList<String>();
-    private ArrayList<String> successor1DeleteList = new ArrayList<String>();
-    private ArrayList<String> successor2DeleteList = new ArrayList<String>();
-
-    private boolean insertFlagForSameKey = false;
-    private Object insertLockForSameKey = new Object();
-
-
+    private int missingKeysReplyCount = 0;
+    private int missingKeysActivePorts = 3; // Standard value
 
     @Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
@@ -113,13 +108,14 @@ public class SimpleDynamoProvider extends ContentProvider {
 	public Uri insert(Uri uri, ContentValues values) {
 		// TODO Auto-generated method stub
 
-        Log.v("insert", values.toString());
-        String key = values.getAsString("key");
-        String value = values.getAsString("value");
-
         try {
+
             synchronized (insertLock) {
                 while ( insertFlag != true ) {
+
+                    Log.v("insert", values.toString());
+                    String key = values.getAsString("key");
+                    String value = values.getAsString("value");
 
                     insertValues(key, value);
                     insertLock.wait();
@@ -172,9 +168,6 @@ public class SimpleDynamoProvider extends ContentProvider {
                 }
 
                 Log.d(TAG,"No of local files:"+index);
-                Log.d(TAG,"Coordinator delete list size:"+coordinatorDeleteList.size());
-                Log.d(TAG,"Successor1 delete list size:"+successor1DeleteList.size());
-                Log.d(TAG,"Successor2 delete list size:"+successor2DeleteList.size());
                 return matrixCursor;
             }
             else // other cases
@@ -257,15 +250,28 @@ public class SimpleDynamoProvider extends ContentProvider {
         successor1HashMap.clear();
         successor2HashMap.clear();
 
-        coordinatorDeleteList.clear();
-        successor1DeleteList.clear();
-        successor2DeleteList.clear();
-
+        deleteAllLocalFiles();
 
         initializeNodeList();
-
-        // Also check if you missed any keys, ask predecessors and successors
         askForMissingKeys();
+
+//        try {
+//            synchronized (insertLock) {
+//
+//                while (insertFlag!= true)
+//                {
+//                    // Also check if you missed any keys, ask predecessors and successors
+//                    askForMissingKeys();
+//                    insertLock.wait();
+//                }
+//
+//                insertFlag = false; // reset the flag
+//            }
+//        } catch (InterruptedException x) {
+//            Log.d(TAG,"interrupted while waiting");
+//
+//        }
+
     }
 
     private void insertValues(String key, String value)
@@ -498,24 +504,19 @@ public class SimpleDynamoProvider extends ContentProvider {
 
     private MatrixCursor handleOtherQueryCases(MatrixCursor matrixCursor, String selection)
     {
-    //        if(selection.equals(currentInsertKey))
-    //        {
-    //
-    //        }
-    //        else
-    //            matrixCursor = handleOtherQueryCases1(matrixCursor, selection);
+        // query is asking for the key just inserted
+        // If insert operation is in progress - block on query
+        // Unblock when insert finishes and proceed with query
 
-            // query is asking for the key just inserted
-            // If insert operation is in progress - block on query
-            // Unblock when insert finishes and proceed with query
 //        try {
-//            synchronized (insertLockForSameKey) {
-//                if (insertFlag)
-//                    insertLockForSameKey.wait();
-//
-//                matrixCursor =
-//
+//            synchronized (insertLock) {
+//                while (insertFlag!= true)
+//                {
+//                    matrixCursor = handleOtherQueryCases1(matrixCursor, selection);
+//                    insertLock.wait();
+//                }
 //            }
+//
 //        } catch ( InterruptedException x ) {
 //            Log.d(TAG,"interrupted while waiting");
 //        }
@@ -526,40 +527,40 @@ public class SimpleDynamoProvider extends ContentProvider {
     private MatrixCursor handleOtherQueryCases1(MatrixCursor matrixCursor, String selection)
     {
         try {
+            synchronized (valueLock) {
+                while ( globalFlag != true ) {
 
-            String hashedKey = genHash(selection);
-            String coordinatorPortNo = getCoordinatorPortNo(hashedKey);
+                    String hashedKey = genHash(selection);
+                    String coordinatorPortNo = getCoordinatorPortNo(hashedKey);
 
-            ArrayList<String> successorPorts = getSuccessorPorts(coordinatorPortNo);
+                    ArrayList<String> successorPorts = getSuccessorPorts(coordinatorPortNo);
 
-            // chain replication - reads at tail, inserts at the head
-            // Now ask the successors for query, starting with second successor first
-            // In case second succ fails, ask the first succ
+                    // chain replication - reads at tail, inserts at the head
+                    // Now ask the successors for query, starting with second successor first
+                    // In case second succ fails, ask the first succ
 
-            String secondSuccessorPortNo = successorPorts.get(1); // Hardcoded bocz there are only two successors
+                    String secondSuccessorPortNo = successorPorts.get(1); // Hardcoded bocz there are only two successors
 
-            try {
-                synchronized (valueLock) {
-                    while ( globalFlag != true ) {
-
-                        new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, secondSuccessorPortNo,
-                                constructQueryObject(selection, coordinatorPortNo, successorPorts.get(0),
-                                        successorPorts.get(1), successorPorts.get(1)), Constants.DATA_QUERY_REQUEST);
-                        valueLock.wait();
-
-                    }
-                    // value is now true
-
-                    globalFlag = false;
-                    matrixCursor.addRow(new Object[]{selection, globalValue});
-                    globalValue = "";
-                    return matrixCursor;
-
+                    new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, secondSuccessorPortNo,
+                            constructQueryObject(selection, coordinatorPortNo, successorPorts.get(0),
+                                    successorPorts.get(1), successorPorts.get(1)), Constants.DATA_QUERY_REQUEST);
+                    valueLock.wait();
 
                 }
-            } catch ( InterruptedException x ) {
-                Log.d(TAG,"interrupted while waiting");
+                // value is now true
+
+                globalFlag = false;
+                matrixCursor.addRow(new Object[]{selection, globalValue});
+                globalValue = "";
+                return matrixCursor;
+
+
             }
+        } catch ( InterruptedException x ) {
+            Log.d(TAG,"interrupted while waiting");
+        } catch (NoSuchAlgorithmException e) {
+            e.printStackTrace();
+        }
 
 
 //            if(coordinatorPortNo.equals(myNode.getPortNo()))
@@ -596,18 +597,10 @@ public class SimpleDynamoProvider extends ContentProvider {
 //            }
 
 
-        } catch (NoSuchAlgorithmException e) {
-            e.printStackTrace();
-        }
+
+
 
         return matrixCursor;
-    }
-
-    private MatrixCursor returnCursorFromName(String fileName, MatrixCursor cursor)
-    {
-        String value = getFileContentFromName(fileName);
-        cursor.addRow(new Object[]{fileName, value});
-        return cursor;
     }
 
     private MatrixCursor handleAllDataQuery(MatrixCursor matrixCursor)
@@ -765,7 +758,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             if(coordinatorPortNo.equals(myNode.getPortNo()))
             {
                 getContext().getFileStreamPath(selection).delete();
-                coordinatorDeleteList.add(selection);
+                //coordinatorDeleteList.add(selection);
                 coordinatorHashMap.remove(selection);
                 deleteReplicaDirectlyInSuccessors(selection, coordinatorPortNo);
             }
@@ -861,15 +854,6 @@ public class SimpleDynamoProvider extends ContentProvider {
             insertFlag = true;
             insertLock.notify();  // notifyAll() might be safer...
         }
-
-        synchronized (insertLockForSameKey) {
-            insertLockForSameKey.notify();
-        }
-    }
-
-    private String stripVersion(String fileName)
-    {
-        return fileName.split(Constants.VERSION_SEPARATOR)[0];
     }
 
     private void saveReplicaDirectlyInSuccessors(String key, String value, String dataOriginPort, String coordinatorPortNo)
@@ -917,6 +901,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 
     private void askForMissingKeys()
     {
+        //missingKeysReplyCount = 0;
+        //missingKeysActivePorts = 3;
+
         ArrayList<String> predecessors = getPredecessorPorts();
         ArrayList<String> successors = getSuccessorPorts(myNode.getPortNo());
 
@@ -993,17 +980,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             sb.append(Constants.TEXT_SEPARATOR);
         }
 
-        sb.append(Constants.INSERT_DELETE_SEPARATOR);
-
-        for(String deleteKey: coordinatorDeleteList)
-        {
-           sb.append(deleteKey);
-           sb.append(Constants.TEXT_SEPARATOR);
-        }
-
         String s = sb.toString();
-//        if(s.isEmpty())
-//            s = s + Constants.NO_KEYS;
 
         return s;
     }
@@ -1035,17 +1012,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             sb.append(Constants.TEXT_SEPARATOR);
         }
 
-        sb.append(Constants.INSERT_DELETE_SEPARATOR);
-
-        for(String deleteKey: successor1DeleteList)
-        {
-            sb.append(deleteKey);
-            sb.append(Constants.TEXT_SEPARATOR);
-        }
-
         String s = sb.toString();
-//        if(s.isEmpty())
-//            s = s + Constants.NO_KEYS;
 
         return s;
     }
@@ -1079,14 +1046,19 @@ public class SimpleDynamoProvider extends ContentProvider {
     private void parseInsertContent(String insertContent, int type)
     {
         // Play insert
-        String[] keyvals = insertContent.split(Constants.TEXT_SEPARATOR);
+        Log.d(TAG,"Insert content:"+insertContent);
+        String[] keyvals = insertContent.split(Pattern.quote(Constants.TEXT_SEPARATOR));
+        Log.d(TAG,"keyvals:"+keyvals+" keyvals size:"+keyvals.length);
+
         for(String keyval: keyvals)
         {
+            Log.d(TAG,"Each keyval:"+keyval);
             if(!keyval.isEmpty())
             {
-                String[] a = keyval.split(Constants.KEY_VALUE_SEPARATOR);
+                String[] a = keyval.split(Pattern.quote(Constants.KEY_VALUE_SEPARATOR));
                 if(a.length == 2)
                 {
+                    Log.d(TAG,"A[0]:"+a[0]+" A[1]:"+a[1]);
                     saveLocally(a[0], a[1]); // Because any type of key should be saved locally
                     if(type == 100)
                     {
@@ -1108,38 +1080,6 @@ public class SimpleDynamoProvider extends ContentProvider {
             }
         }
 
-    }
-
-    private void parseDeleteContent(String deleteContent, int type)
-    {
-        Log.d(TAG,"Coordinator delete list size:"+coordinatorDeleteList.size());
-        Log.d(TAG,"Successor1 delete list size:"+successor1DeleteList.size());
-        Log.d(TAG,"Successor2 delete list size:"+successor2DeleteList.size());
-
-        // Play delete
-        String[] deleteKeys = deleteContent.split(Constants.TEXT_SEPARATOR);
-        for(String deleteKey: deleteKeys)
-        {
-            if(!deleteKey.isEmpty())
-            {
-                getContext().getFileStreamPath(deleteKey).delete();
-                if(type == 100)
-                {
-                    successor1DeleteList.add(deleteKey);
-                    successor1HashMap.remove(deleteKey);
-                }
-                else if(type == 101)
-                {
-                    successor2DeleteList.add(deleteKey);
-                    successor2HashMap.remove(deleteKey);
-                }
-                else if(type == 102)
-                {
-                    coordinatorDeleteList.add(deleteKey);
-                    coordinatorHashMap.remove(deleteKey);
-                }
-            }
-        }
     }
 
     private class clientTask extends AsyncTask<String, String, Void> {
@@ -1173,7 +1113,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                 else if(msgs[2].equals(Constants.INSERT_REPLICA_REQUEST))
                     publishProgress(Constants.INSERT_REPLICA_REPLY, reply);
                 else if(msgs[2].equals(Constants.DATA_QUERY_REQUEST))
-                    handleDataQueryReply(reply);
+                     handleDataQueryReply(reply);
                 else if(msgs[2].equals(Constants.ALL_DATA_QUERY_REQUEST))
                     handleAllDataQueryReply(reply);
                 else if(msgs[2].equals(Constants.DIRECT_INSERT_REPLICA_REQUEST))
@@ -1295,7 +1235,6 @@ public class SimpleDynamoProvider extends ContentProvider {
                     globalValue = value;
                     valueLock.notify();  // notifyAll() might be safer...
                 }
-
 
             } catch (JSONException e) {
                 e.printStackTrace();
@@ -1439,6 +1378,12 @@ public class SimpleDynamoProvider extends ContentProvider {
 
                     deleteReplicaDirectlyInSuccessors(key, remotePortNo);
                 }
+                else if(caseType.equals(Constants.ASK_MISSING_KEYS))
+                {
+                    // Remote port has failed
+                    //missingKeysActivePorts--;
+                    //checkMissingKeysReplyStatus();
+                }
 
             } catch (JSONException e) {
                 Log.e(TAG,"JSON Exception occurred");
@@ -1484,26 +1429,10 @@ public class SimpleDynamoProvider extends ContentProvider {
                 int keyType = jsonObject.getInt(Constants.KEY_TYPE);
                 String keyContent = jsonObject.getString(Constants.KEY_CONTENT);
 
-                // First separate insert and delete content
-
-                String[] allContent = keyContent.split(Constants.INSERT_DELETE_SEPARATOR);
-
-                int index=0;
-                for(String content: allContent)
+                if(!keyContent.isEmpty())
                 {
-                    if(!content.isEmpty())
-                    {
-                       if(index==0)
-                       {
-                          parseInsertContent(content, keyType);
-                       }
-                       else if(index==1)
-                       {
-                           parseDeleteContent(content, keyType);
-                       }
-                    }
-                    index++;
-                }
+                    parseInsertContent(keyContent, keyType);
+
 // For readability
 //                if(keyType == 100)  // Got your successor1 keys
 //                {
@@ -1540,13 +1469,31 @@ public class SimpleDynamoProvider extends ContentProvider {
 //                        parseKeyContent(keyContent, 102);
 //                    }
 //                }
+                }
+
+                //missingKeysReplyCount++;
+                //checkMissingKeysReplyStatus();
 
             } catch (JSONException e) {
                 e.printStackTrace();
             }
         }
 
+        private void checkMissingKeysReplyStatus()
+        {
+            Log.d(TAG,"missingKeysReplyCount:"+missingKeysReplyCount+" missingKeysActivePorts:"+missingKeysActivePorts);
+            if(missingKeysReplyCount == missingKeysActivePorts) // Received content from all active emulators
+            {
+                Log.d(TAG,"Removing insert lock");
+                synchronized ( insertLock ) {
+                    insertFlag = true;
+                    insertLock.notify();  // notifyAll() might be safer...
+                }
+            }
+        }
+
     }
+
 
     private class ServerTask extends AsyncTask<ServerSocket, String, Void> {
 
@@ -1573,8 +1520,9 @@ public class SimpleDynamoProvider extends ContentProvider {
                     if (status == 1) {
 
                         Log.d(TAG,"Status is 1");
+                        Log.v(TAG,"Insert forward request handling");
                         bufferedWriter.write(Constants.DUMMY_REPLY); // Send dummy replies to tell you are alive..
-                        publishProgress(Constants.INSERT_FORWARD_REQUEST, message);
+                        handleInsertForwardRequest(message);
                     } else if (status == 2) {
 
                         Log.d(TAG,"Status is 2");
@@ -1596,22 +1544,30 @@ public class SimpleDynamoProvider extends ContentProvider {
 
                         Log.d(TAG,"Status is 7");
                         bufferedWriter.write(Constants.DUMMY_REPLY); // Send dummy replies to tell you are alive..
-                        publishProgress(Constants.ALL_DATA_DELETE_REQUEST, message);
+                        //publishProgress(Constants.ALL_DATA_DELETE_REQUEST, message);
+                        Log.v(TAG,"All Data delete request");
+                        deleteAllLocalFiles();
                     } else if (status == 8) {
 
                         Log.d(TAG,"Status is 8");
                         bufferedWriter.write(Constants.DUMMY_REPLY); // Send dummy replies to tell you are alive..
-                        publishProgress(Constants.SINGLE_DATA_DELETE_REQUEST, message);
+                        //publishProgress(Constants.SINGLE_DATA_DELETE_REQUEST, message);
+                        Log.v(TAG,"Single file delete request");
+                        handleFileDeleteRequest(message);
                     } else if (status == 9) {
 
                         Log.d(TAG,"Status is 9");
                         bufferedWriter.write(Constants.DUMMY_REPLY); // Send dummy replies to tell you are alive..
-                        publishProgress(Constants.DELETE_REPLICA_REQUEST, message);
+                        //publishProgress(Constants.DELETE_REPLICA_REQUEST, message);
+                        Log.v(TAG,"delete replica  request");
+                        handleReplicaDeleteRequest(message);
                     } else if (status == 11) {
 
                         Log.d(TAG,"Status is 11");
                         bufferedWriter.write(Constants.DUMMY_REPLY); // Send dummy replies to tell you are alive..
-                        publishProgress(Constants.REPLICATION_DONE, message);
+                        //publishProgress(Constants.REPLICATION_DONE, message);
+                        Log.v(TAG,"replication done");
+                        handleReplicationDone();
                     } else if (status == 12) {
 
                         Log.d(TAG,"Status is 12");
@@ -1626,7 +1582,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 
                         Log.d(TAG,"Status is 16");
                         bufferedWriter.write(Constants.DUMMY_REPLY); // Send dummy replies to tell you are alive..
-                        publishProgress(Constants.DELETE_REPLICA_REQUEST, message); // Direct delete or simple delete - both do the same job
+                        //publishProgress(Constants.DELETE_REPLICA_REQUEST, message); // Direct delete or simple delete - both do the same job
+                        Log.v(TAG,"direct delete replica  request");
+                        handleReplicaDeleteRequest(message);
                     }
 
 
@@ -1645,43 +1603,6 @@ public class SimpleDynamoProvider extends ContentProvider {
                 }
                 //return null;
             }
-        }
-
-        protected void onProgressUpdate(String... strings) {
-
-            //Log.d(TAG, "Received:" + strings[0] + " My port:" + myPort);
-            if(strings[0].equals(Constants.INSERT_FORWARD_REQUEST))
-            {
-                Log.v(TAG,"Insert forward request handling");
-                handleInsertForwardRequest(strings[1]);
-            }
-            else  if(strings[0].equals(Constants.INSERT_REPLICA_REQUEST))
-            {
-              // Doesn't happen
-            }
-            else if(strings[0].equals(Constants.ALL_DATA_DELETE_REQUEST))
-            {
-                Log.v(TAG,"All Data delete request");
-                deleteAllLocalFiles();
-            }
-            else if(strings[0].equals(Constants.SINGLE_DATA_DELETE_REQUEST))
-            {
-                Log.v(TAG,"Single file delete request");
-                handleFileDeleteRequest(strings[1]);
-            }
-            else if(strings[0].equals(Constants.DELETE_REPLICA_REQUEST))
-            {
-                Log.v(TAG,"delete replica  request");
-                handleReplicaDeleteRequest(strings[1]);
-            }
-            else if(strings[0].equals(Constants.REPLICATION_DONE))
-            {
-                Log.v(TAG,"replication done");
-                handleReplicationDone();
-            }
-
-
-            return;
         }
 
 
@@ -1743,10 +1664,15 @@ public class SimpleDynamoProvider extends ContentProvider {
 
                 JSONObject jsonObject = new JSONObject(object);
                 String key = jsonObject.getString(Constants.KEY);
+                String value = getFileContentFromName(key);
 
-                return constructQueryReplyObject(key, getFileContentFromName(key));
+                if(value == null || value.isEmpty())
+                    return "";
+                else
+                    return constructQueryReplyObject(key, value);
 
-            } catch (JSONException e) {
+            }
+            catch (JSONException e) {
                 e.printStackTrace();
             }
 
@@ -1771,7 +1697,8 @@ public class SimpleDynamoProvider extends ContentProvider {
                 String selection = jsonObject.getString(Constants.KEY);
 
                 getContext().getFileStreamPath(selection).delete();
-                coordinatorDeleteList.add(selection);
+                coordinatorHashMap.remove(selection);
+                //coordinatorDeleteList.add(selection);
 
                 // Now ask successors to delete this file
                 deleteReplicaInSuccessors(selection);
@@ -1795,12 +1722,12 @@ public class SimpleDynamoProvider extends ContentProvider {
 
                 if(replicaIndex == 1)
                 {
-                    successor1DeleteList.add(selection);
+                    //successor1DeleteList.add(selection);
                     successor1HashMap.remove(selection);
                 }
                 else if(replicaIndex == 2)
                 {
-                    successor2DeleteList.add(selection);
+                    //successor2DeleteList.add(selection);
                     successor2HashMap.remove(selection);
                 }
 

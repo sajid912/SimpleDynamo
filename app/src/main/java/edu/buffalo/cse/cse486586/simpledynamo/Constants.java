@@ -41,8 +41,8 @@ public class Constants {
     public static final String ALL_DATA_QUERY_REQUEST = "allDataQueryRequest";
     public static final String ALL_DATA_QUERY_REPLY = "allDataQueryReply";
 
-    public static final String TEXT_SEPARATOR = "---";
-    public static final String INSERT_DELETE_SEPARATOR = ";+-+;";
+    public static final String TEXT_SEPARATOR = "===";
+    public static final String INSERT_DELETE_SEPARATOR = "+-+";
     public static final String VERSION_SEPARATOR = "SAJIDKHA";
     public static final String KEY_VALUE_SEPARATOR = ";";
     public static final String ALL_DATA_QUERY_CONTENT = "allDataQueryContent";
