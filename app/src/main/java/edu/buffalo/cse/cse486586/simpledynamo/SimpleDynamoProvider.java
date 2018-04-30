@@ -901,8 +901,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 
     private void askForMissingKeys()
     {
-        //missingKeysReplyCount = 0;
-        //missingKeysActivePorts = 3;
+//        missingKeysReplyCount = 0;
+//        missingKeysActivePorts = 3;
 
         ArrayList<String> predecessors = getPredecessorPorts();
         ArrayList<String> successors = getSuccessorPorts(myNode.getPortNo());
@@ -1059,21 +1059,28 @@ public class SimpleDynamoProvider extends ContentProvider {
                 if(a.length == 2)
                 {
                     Log.d(TAG,"A[0]:"+a[0]+" A[1]:"+a[1]);
-                    saveLocally(a[0], a[1]); // Because any type of key should be saved locally
-                    if(type == 100)
+                    // Before you save, check if file is existing already.
+                    // If it is someone inserted the file before you could boot load the files from neighbors
+                    // Thus inserted file may be the latest.. you may conisder not overwriting new file
+                    String value = getFileContentFromName(a[0]);
+                    if(value == null || value.isEmpty())
                     {
-                        //successor1HashMap.clear();
-                        successor1HashMap.put(a[0],a[1]);
-                    }
-                    else if(type == 101)
-                    {
-                        //successor2HashMap.clear();
-                        successor2HashMap.put(a[0],a[1]);
-                    }
-                    else if(type == 102)
-                    {
-                        //coordinatorHashMap.clear();
-                        coordinatorHashMap.put(a[0],a[1]);
+                        saveLocally(a[0], a[1]);
+                        if(type == 100)
+                        {
+                            //successor1HashMap.clear();
+                            successor1HashMap.put(a[0],a[1]);
+                        }
+                        else if(type == 101)
+                        {
+                            //successor2HashMap.clear();
+                            successor2HashMap.put(a[0],a[1]);
+                        }
+                        else if(type == 102)
+                        {
+                            //coordinatorHashMap.clear();
+                            coordinatorHashMap.put(a[0],a[1]);
+                        }
                     }
                 }
 
@@ -1381,8 +1388,8 @@ public class SimpleDynamoProvider extends ContentProvider {
                 else if(caseType.equals(Constants.ASK_MISSING_KEYS))
                 {
                     // Remote port has failed
-                    //missingKeysActivePorts--;
-                    //checkMissingKeysReplyStatus();
+//                    missingKeysActivePorts--;
+//                    checkMissingKeysReplyStatus();
                 }
 
             } catch (JSONException e) {
@@ -1471,8 +1478,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 //                }
                 }
 
-                //missingKeysReplyCount++;
-                //checkMissingKeysReplyStatus();
+//                missingKeysReplyCount++;
+//                checkMissingKeysReplyStatus();
 
             } catch (JSONException e) {
                 e.printStackTrace();
@@ -1489,6 +1496,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                     insertFlag = true;
                     insertLock.notify();  // notifyAll() might be safer...
                 }
+
             }
         }
 
