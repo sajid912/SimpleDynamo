@@ -108,20 +108,22 @@ public class SimpleDynamoProvider extends ContentProvider {
 	public Uri insert(Uri uri, ContentValues values) {
 		// TODO Auto-generated method stub
 
+        Log.v("insert", values.toString());
+        String key = new String(values.getAsString("key"));
+        String value = new String(values.getAsString("value"));
+
         try {
 
             synchronized (insertLock) {
                 while ( insertFlag != true ) {
-
-                    Log.v("insert", values.toString());
-                    String key = values.getAsString("key");
-                    String value = values.getAsString("value");
 
                     insertValues(key, value);
                     insertLock.wait();
                 }
                 // value is now true
                 insertFlag = false;
+                key = "";
+                value = "";
             }
         } catch ( InterruptedException x ) {
             Log.d(TAG,"interrupted while waiting");
@@ -173,7 +175,27 @@ public class SimpleDynamoProvider extends ContentProvider {
             else // other cases
             {
                 MatrixCursor matrixCursor = new MatrixCursor(new String[]{"key", "value"});
-                return handleOtherQueryCases(matrixCursor, selection);
+                //String newSelection = new String(selection);
+
+                try
+                {
+                    synchronized (valueLock) {
+                        while ( globalFlag != true ) {
+
+                            handleOtherQueryCases(selection);
+                            valueLock.wait();
+                        }
+                        // value is now true
+
+                        globalFlag = false;
+                        matrixCursor.addRow(new Object[]{selection, globalValue});
+                        globalValue = "";
+                        selection = "";
+                    }
+
+                } catch (InterruptedException e){}
+
+                return matrixCursor;
 
             }
 
@@ -502,7 +524,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         }
     }
 
-    private MatrixCursor handleOtherQueryCases(MatrixCursor matrixCursor, String selection)
+    private void handleOtherQueryCases(String selection)
     {
         // query is asking for the key just inserted
         // If insert operation is in progress - block on query
@@ -521,47 +543,31 @@ public class SimpleDynamoProvider extends ContentProvider {
 //            Log.d(TAG,"interrupted while waiting");
 //        }
 
-        return handleOtherQueryCases1(matrixCursor, selection);
+         handleOtherQueryCases1(selection);
     }
 
-    private MatrixCursor handleOtherQueryCases1(MatrixCursor matrixCursor, String selection)
+    private void handleOtherQueryCases1(String selection)
     {
         try {
-            synchronized (valueLock) {
-                while ( globalFlag != true ) {
 
-                    String hashedKey = genHash(selection);
-                    String coordinatorPortNo = getCoordinatorPortNo(hashedKey);
+            String hashedKey = genHash(selection);
+            String coordinatorPortNo = getCoordinatorPortNo(hashedKey);
 
-                    ArrayList<String> successorPorts = getSuccessorPorts(coordinatorPortNo);
+            ArrayList<String> successorPorts = getSuccessorPorts(coordinatorPortNo);
 
-                    // chain replication - reads at tail, inserts at the head
-                    // Now ask the successors for query, starting with second successor first
-                    // In case second succ fails, ask the first succ
+            // chain replication - reads at tail, inserts at the head
+            // Now ask the successors for query, starting with second successor first
+            // In case second succ fails, ask the first succ
 
-                    String secondSuccessorPortNo = successorPorts.get(1); // Hardcoded bocz there are only two successors
+            String secondSuccessorPortNo = successorPorts.get(1); // Hardcoded bocz there are only two successors
 
-                    new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, secondSuccessorPortNo,
-                            constructQueryObject(selection, coordinatorPortNo, successorPorts.get(0),
-                                    successorPorts.get(1), successorPorts.get(1)), Constants.DATA_QUERY_REQUEST);
-                    valueLock.wait();
+            new clientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, secondSuccessorPortNo,
+                    constructQueryObject(selection, coordinatorPortNo, successorPorts.get(0),
+                            successorPorts.get(1), successorPorts.get(1)), Constants.DATA_QUERY_REQUEST);
 
-                }
-                // value is now true
-
-                globalFlag = false;
-                matrixCursor.addRow(new Object[]{selection, globalValue});
-                globalValue = "";
-                return matrixCursor;
-
-
-            }
-        } catch ( InterruptedException x ) {
-            Log.d(TAG,"interrupted while waiting");
-        } catch (NoSuchAlgorithmException e) {
+        }  catch (NoSuchAlgorithmException e) {
             e.printStackTrace();
         }
-
 
 //            if(coordinatorPortNo.equals(myNode.getPortNo()))
 //            {
@@ -596,11 +602,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 //
 //            }
 
-
-
-
-
-        return matrixCursor;
     }
 
     private MatrixCursor handleAllDataQuery(MatrixCursor matrixCursor)
